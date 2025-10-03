@@ -1,0 +1,12 @@
+README.md
+setup.py
+sparse_attention.cc
+3rdparty/FBGEMM/src/FbgemmBfloat16Convert.cc
+3rdparty/FBGEMM/src/FbgemmBfloat16ConvertAvx2.cc
+3rdparty/FBGEMM/src/FbgemmBfloat16ConvertAvx512.cc
+3rdparty/FBGEMM/src/RefImplementations.cc
+3rdparty/FBGEMM/src/Utils.cc
+sparse_attention_cpu.egg-info/PKG-INFO
+sparse_attention_cpu.egg-info/SOURCES.txt
+sparse_attention_cpu.egg-info/dependency_links.txt
+sparse_attention_cpu.egg-info/top_level.txt

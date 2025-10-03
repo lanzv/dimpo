@@ -1,0 +1,7 @@
+datasets==3.6.0
+lm_eval==0.4.9.1
+numpy==2.3.3
+psutil==7.0.0
+scikit_learn==1.7.2
+torch==2.5.1+cu121
+transformers==4.56.1
