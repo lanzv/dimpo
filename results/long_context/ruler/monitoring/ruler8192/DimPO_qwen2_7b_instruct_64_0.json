@@ -1,7 +1,0 @@
-{
-    "total_tokens_processed": 237040,
-    "total_processing_time_s": 38720.5352,
-    "average_throughput_tokens_per_s": 6.1218,
-    "peak_cpu_memory_mb": 3030.7578,
-    "total_peak_gpu_memory_across_all_gpus_mb": 33505.1665
-}

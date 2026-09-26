@@ -75,21 +75,52 @@ class LowDimModuleBase(abc.ABC):
 
     def eval_batch(self, queries, keys, input_mask=None, values=None):
         original_attention = compute_attention_score_distribution(queries, keys, input_mask)
-        
+
         # Project queries and keys using the abstract method
         projected_queries = self.project(queries)
         projected_keys = self.project(keys)
-        
+
         projected_attention = compute_attention_score_distribution(projected_queries, projected_keys, input_mask)
-        
-        self._scores["kl_divergence"] += eval_attentions_kl_divergence(original_attention, projected_attention, input_mask)
-        self._scores["js_divergence"] += eval_attentions_js_divergence(original_attention, projected_attention, input_mask)
-        self._scores["mse"] += eval_attentions_mse(original_attention, projected_attention, input_mask)
-        self._scores["mae"] += eval_attentions_mae(original_attention, projected_attention, input_mask)
-        if values != None:
+
+        _, H, _, _ = original_attention.shape
+        chunk_size_h = 4  # adjust if needed
+
+        for h_start in range(0, H, chunk_size_h):
+            h_end = min(h_start + chunk_size_h, H)
+
+            # Slice chunk of heads
+            orig_chunk = original_attention[:, h_start:h_end, :, :]
+            proj_chunk = projected_attention[:, h_start:h_end, :, :]
+
+            # Same slicing for mask
+            mask_chunk = input_mask if input_mask is not None else None
+
+            # Evaluate metrics on this head chunk
+            self._scores["kl_divergence"] += eval_attentions_kl_divergence(
+                orig_chunk, proj_chunk, mask_chunk
+            )
+            self._scores["js_divergence"] += eval_attentions_js_divergence(
+                orig_chunk, proj_chunk, mask_chunk
+            )
+            self._scores["mse"] += eval_attentions_mse(
+                orig_chunk, proj_chunk, mask_chunk
+            )
+            self._scores["mae"] += eval_attentions_mae(
+                orig_chunk, proj_chunk, mask_chunk
+            )
+
+        if values is not None:
             original_fa = compute_full_attention(values=values, softmax_dot=original_attention)
             projected_fa = compute_full_attention(values=values, softmax_dot=projected_attention)
-            self._scores["fa_mse"] += eval_attentions_mse(original_fa, projected_fa)
+            _, H, _, _ = original_fa.shape
+            for h_start in range(0, H, chunk_size_h):
+                h_end = min(h_start + chunk_size_h, H)
+
+                # Slice chunk of heads
+                orig_chunk = original_fa[:, h_start:h_end, :, :]
+                proj_chunk = projected_fa[:, h_start:h_end, :, :]
+
+            self._scores["fa_mse"] += eval_attentions_mse(orig_chunk, proj_chunk)
 
     def finalize_score_collection(self):
         scores_means = {
@@ -106,7 +137,20 @@ class LowDimModuleBase(abc.ABC):
         return queries[:, :, ::queries.shape[1], :]
     
     def save(self, target_dir, layer_id):
-        logging.warning(f"It is not supported to save weights.")
+        logging.warning(f"Config might be incompleted.")
+        checkpoint = {
+            "model_state_dict": self.model.linear.state_dict(),
+            "config": {
+                "target_dim": self.target_dim,
+                "original_dim": self.original_dim,
+                "beta": None,
+                "gamma": None,
+                "lr": None,
+                "batch_size": None
+            }
+        }
+        path_to_checkpoint = os.path.join(target_dir, f"checkpoint_{layer_id}.pth")
+        torch.save(checkpoint, path_to_checkpoint)
 
 
 
@@ -203,13 +247,15 @@ class LowDimPCA(LowDimModuleBase):
 
 
 class LowDimDimPOFactory(LowDimFactoryBase):
-    def __init__(self, target_dim, beta=2.5, gamma=0.0, lr=0.01, batch_size=1, num_sampled_keys=None):
+    def __init__(self, target_dim, beta=2.5, gamma=0.0, lr=0.01, batch_size=1, k=64, lmbda=1.0, num_sampled_keys=None):
         super().__init__()
         self.target_dim = target_dim
         self.beta = beta
         self.gamma = gamma
         self.lr = lr
         self.batch_size = batch_size
+        self.k = k
+        self.lmbda = lmbda
         self.num_sampled_keys = num_sampled_keys
 
     def create(self):
@@ -221,25 +267,29 @@ class LowDimDimPOFactory(LowDimFactoryBase):
             gamma=self.gamma,
             lr=self.lr,
             batch_size=self.batch_size,
+            k=self.k,
+            lmbda=self.lmbda,
             num_sampled_keys=self.num_sampled_keys
         )
 
 
 class LowDimDimPO(LowDimModuleBase):
-    def __init__(self, target_dim, original_dim, beta=2.5, gamma=0.0, lr=0.01, batch_size=1, num_sampled_keys=None, loaded_state_dict=None, dtype=torch.float32):
+    def __init__(self, target_dim, original_dim, beta=2.5, gamma=0.0, lr=0.01, batch_size=1, k=64, lmbda=1.0, num_sampled_keys=None, loaded_state_dict=None, dtype=torch.float32):
         super().__init__()
         self.target_dim = target_dim
         self.beta = beta
         self.gamma = gamma
         self.batch_size = batch_size
         self.lr = lr
+        self.k = k
+        self.lmbda = lmbda
         self.original_dim = original_dim
 
         if loaded_state_dict is None:
-            self.model = LinearProjection(original_dim, target_dim).cuda()
+            self.model = LinearProjection(original_dim, target_dim).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         else:
-            self.model = LinearProjection(original_dim, target_dim).cuda()
+            self.model = LinearProjection(original_dim, target_dim).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
             self.model.linear.load_state_dict(loaded_state_dict)
             self.model.to(dtype)
             self.optimizer = None
@@ -251,7 +301,7 @@ class LowDimDimPO(LowDimModuleBase):
         self.skipping_not_logged_yet = True
 
 
-        self.loss_fn = DimPOLoss(beta=self.beta, gamma=self.gamma)
+        self.loss_fn = DimPOLoss(beta=self.beta, gamma=self.gamma, k=self.k, lmbda=self.lmbda)
 
         
     def project(self, vectors):
@@ -296,7 +346,9 @@ class LowDimDimPO(LowDimModuleBase):
                 "beta": self.beta, 
                 "gamma": self.gamma,
                 "lr": self.lr,
-                "batch_size": self.batch_size
+                "batch_size": self.batch_size,
+                "k": self.k,
+                "lmbda": self.lmbda,
             }
         }
         path_to_checkpoint = os.path.join(target_dir, f"checkpoint_{layer_idx}.pth")
@@ -304,10 +356,10 @@ class LowDimDimPO(LowDimModuleBase):
 
     def load_from_disk(target_dir, layer_idx, dtype=torch.float32):
         path_to_checkpoint = os.path.join(target_dir, f"checkpoint_{layer_idx}.pth")
-        loaded_checkpoint = torch.load(path_to_checkpoint)
+        loaded_checkpoint = torch.load(path_to_checkpoint, map_location="cpu")
         loaded_state_dict = loaded_checkpoint["model_state_dict"]
         config = loaded_checkpoint["config"]
-        return LowDimDimPO(target_dim=config["target_dim"], original_dim=config["original_dim"], beta=config["beta"], gamma=config["gamma"], lr=config["lr"], batch_size=config["batch_size"], loaded_state_dict=loaded_state_dict, dtype=dtype)
+        return LowDimDimPO(target_dim=config["target_dim"], original_dim=config["original_dim"], beta=config["beta"], gamma=config["gamma"], lr=config["lr"], batch_size=config["batch_size"], k=config.get("k", config.get("top_k", 0)), lmbda=config.get("lmbda", config.get("kl_weight", 0.0)), loaded_state_dict=loaded_state_dict, dtype=dtype)
     
 
     ############################
@@ -346,7 +398,7 @@ class LowDimDimPO(LowDimModuleBase):
             scores = scores / (D_q ** 0.5)
             scores = F.softmax(scores, dim=-1)
     
-            # Sort the attention scores and get sorted indices
+            # Sort by teacher attention, descending, so the head is the first k keys
             sorted_scores, sorted_indices = torch.sort(scores, dim=-1, descending=True)
             keys_reshaped = head_keys.reshape(B_k, K, D_k)
             sorted_indices_reshaped = sorted_indices.reshape(B_q, Q, K)
@@ -388,14 +440,14 @@ class LowDimDimPO(LowDimModuleBase):
             self.model.train()
             for i, (b_q, b_keys, b_scores) in enumerate(loader):
                 self.optimizer.zero_grad()
-                b_q, b_keys, b_scores = b_q.cuda(), b_keys.cuda(), b_scores.cuda()
+                b_q, b_keys, b_scores = b_q.to(torch.device("cuda" if torch.cuda.is_available() else "cpu")), b_keys.to(torch.device("cuda" if torch.cuda.is_available() else "cpu")), b_scores.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
                 # Project
                 proj_q = self.model(b_q)
                 proj_q = proj_q.unsqueeze(1)
                 proj_ks = self.model(b_keys.reshape(-1, b_keys.shape[-1])).reshape(b_keys.shape[0], b_keys.shape[1], -1)
                 
-                # Compute DimPO loss
+                # L_DimPO = L_list + lambda * L_head
                 loss = self.loss_fn(proj_q=proj_q, proj_ks=proj_ks, psi=b_scores)    # [B, K]
     
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -406,11 +458,12 @@ class LowDimDimPO(LowDimModuleBase):
                 loss.backward()
                 self.optimizer.step()
 
-        # Clear processed data, keeping any remainder
+        # Clear processed data, keeping any remainder.
+        # Clone so an empty/short remainder does not retain the full parent storage.
         processed_count = (num_samples // batch_size) * batch_size
-        self._collected_data_q = [all_q[processed_count:]]
-        self._collected_data_k = [all_k[processed_count:]]
-        self._collected_data_scores = [all_scores[processed_count:]]
+        self._collected_data_q = [all_q[processed_count:].clone()]
+        self._collected_data_k = [all_k[processed_count:].clone()]
+        self._collected_data_scores = [all_scores[processed_count:].clone()]
         self.model.eval()
 
 
@@ -452,7 +505,7 @@ class LowDimRand(LowDimModuleBase):
         super().__init__()
         self.target_dim = target_dim
         self.original_dim = original_dim
-        self.random_matrix = torch.randn(original_dim, target_dim).cuda()
+        self.random_matrix = torch.randn(original_dim, target_dim).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
     def project(self, vectors):
         original_shape = vectors.shape
@@ -540,7 +593,7 @@ class LowDimSimPO(LowDimModuleBase):
         self.gamma = gamma # Target reward margin for SimPO
         self.batch_size = batch_size
 
-        self.model = LinearProjection(original_dim, target_dim).cuda()
+        self.model = LinearProjection(original_dim, target_dim).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         
         # SimPO collects pairs of (chosen, rejected) keys for each query.
@@ -659,7 +712,7 @@ class LowDimSimPO(LowDimModuleBase):
             self.model.train()
             for batch_idx, (b_q, b_chosen_k, b_rejected_k) in enumerate(loader):
                 self.optimizer.zero_grad()
-                b_q, b_chosen_k, b_rejected_k = b_q.cuda(), b_chosen_k.cuda(), b_rejected_k.cuda()
+                b_q, b_chosen_k, b_rejected_k = b_q.to(torch.device("cuda" if torch.cuda.is_available() else "cpu")), b_chosen_k.to(torch.device("cuda" if torch.cuda.is_available() else "cpu")), b_rejected_k.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
                 # Project
                 proj_q = self.model(b_q)
@@ -677,11 +730,12 @@ class LowDimSimPO(LowDimModuleBase):
                 loss.backward()
                 self.optimizer.step()
 
-        # Clear processed data, keeping any remainder
+        # Clear processed data, keeping any remainder.
+        # Clone so an empty/short remainder does not retain the full parent storage.
         processed_count = (num_samples // batch_size) * batch_size
-        self._collected_data_q = [all_q[processed_count:]]
-        self._collected_data_chosen_k = [all_chosen_k[processed_count:]]
-        self._collected_data_rejected_k = [all_rejected_k[processed_count:]]
+        self._collected_data_q = [all_q[processed_count:].clone()]
+        self._collected_data_chosen_k = [all_chosen_k[processed_count:].clone()]
+        self._collected_data_rejected_k = [all_rejected_k[processed_count:].clone()]
         self.model.eval()
 
 
@@ -1030,3 +1084,71 @@ class LowDimCPO(LowDimSimPO):
         # CPO loss
         loss = -torch.log(torch.clamp(self.beta * torch.log(prob_w) - self.beta * torch.log(prob_l), min=EPSILON_FOR_LOGARITHMS)) - self.lmbda * torch.log(prob_w)
         return loss.mean()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+####################
+## LowDim KL      ##
+####################
+
+
+class LowDimKLFactory(LowDimFactoryBase):
+    def __init__(self, target_dim, lr=0.01, batch_size=1, num_sampled_keys=None):
+        super().__init__()
+        self.target_dim = target_dim
+        self.lr = lr
+        self.batch_size = batch_size
+        self.num_sampled_keys = num_sampled_keys
+
+    def create(self):
+        super().create()
+        return LowDimKL(
+            target_dim=self.target_dim,
+            original_dim=self.original_dim,
+            lr=self.lr,
+            batch_size=self.batch_size,
+            num_sampled_keys=self.num_sampled_keys
+        )
+
+class LowDimKL(LowDimDimPO):
+    def __init__(self, target_dim, original_dim, lr=0.01, batch_size=1,
+                 num_sampled_keys=None, loaded_state_dict=None, dtype=torch.float32):
+        super().__init__(
+            target_dim=target_dim,
+            original_dim=original_dim,
+            lr=lr,
+            batch_size=batch_size,
+            k=0,
+            lmbda=0.0,
+            num_sampled_keys=num_sampled_keys,
+            loaded_state_dict=loaded_state_dict,
+            dtype=dtype
+        )
+        self.loss_fn = self._kl_loss
+
+    def _kl_loss(self, proj_q, proj_ks, psi):
+        # Predicted attention distribution from compressed Q/K
+        dot = torch.einsum('bqe,bke->bqk', proj_q, proj_ks) * (proj_q.shape[-1] ** -0.5)  # [B, 1, K]
+        pred_log_probs = torch.log_softmax(dot.squeeze(1), dim=-1)  # [B, K]
+        # psi is the original (full-dim) softmax attention distribution
+        true_probs = psi.clamp(min=EPSILON_FOR_LOGARITHMS)
+        # KL(true || pred), same direction as eval_attentions_kl_divergence
+        return F.kl_div(pred_log_probs, true_probs, reduction='batchmean')

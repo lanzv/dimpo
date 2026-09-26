@@ -5,8 +5,10 @@ from src.models.lowdim_modules import (
     LowDimSimPOFactory, 
     LowDimTripletFactory, 
     LowDimCPOFactory,
-    LowDimORPOFactory
+    LowDimORPOFactory,
+    LowDimKLFactory
 )
+from src.models.dimpo_kl import LowDimDimPOKLFactory
 from src.models.lowdim_trainer import LowDimTrainer
 import logging
 import torch
@@ -15,6 +17,7 @@ import json
 import argparse
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from types import MethodType
+
 logging.basicConfig(
     format='%(asctime)s %(levelname)-8s %(message)s',
     level=logging.INFO,
@@ -26,11 +29,11 @@ logging.getLogger().setLevel(logging.INFO)
 
 # register new models here
 MODEL_PATHS = {
-    "llama3_1b_instruct": "meta-llama/Llama-3.2-1B-Instruct",
-    "llama3_3b_instruct": "meta-llama/Llama-3.2-3B-Instruct",
-    "llama3_8b_instruct": "meta-llama/Llama-3.1-8B-Instruct",
-    "qwen3_4b_instruct": "Qwen/Qwen3-4B-Instruct-2507",
-    "qwen2_7b_instruct": "Qwen/Qwen2.5-7B-Instruct",
+    "llama3_1b_instruct": "../models/Llama-3.2-1B-Instruct",
+    "llama3_3b_instruct": "../models/Llama-3.2-3B-Instruct",
+    "llama3_8b_instruct": "../models/Llama-3.1-8B-Instruct",
+    "qwen3_4b_instruct": "../models/Qwen3-4B-Instruct-2507",
+    "qwen2_7b_instruct": "../models/Qwen2.5-7B-Instruct",
 }
 
 # default set to auto if not specified by this dict or by parameter args.device_map
@@ -78,6 +81,7 @@ def run_experiment(lowdim_module_factory, model_path,
 
     if evaluate:
         scores = trainer.eval(num_instances=10, num_tokens_per_instance=4096, batch_size=1, split="validation" if eval_on_devset else "test")
+        os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, scores_file_name)
         with open(output_path, 'w') as f:
             json.dump(scores, f)
@@ -119,17 +123,6 @@ def main(args):
         lowdim_module_factory = LowDimPCAFactory(target_dim=target_dim, full_queries=False)
         scores_file_name = f"PCA_{args.model_name}_{target_dim}{alias}.json"
 
-    elif projection_type == "PCA_full": 
-        """
-        Bigger number of training instances - it is cheap so the training is fast even with more training data
-        however it is not really fair to other methods since we use different number of training instances
-        """
-        logging.info("=========================================")
-        logging.info(f"\t\tPCA {target_dim}, Full Queries: True")
-        logging.info("=========================================\n\n\n\n\n")
-        lowdim_module_factory = LowDimPCAFactory(target_dim=target_dim, full_queries=True)
-        scores_file_name = f"PCAfull_{args.model_name}_{target_dim}{alias}.json"
-
     elif projection_type == "Rand":
         logging.info("=========================================")
         logging.info(f"\t\tRand {target_dim}")
@@ -138,14 +131,22 @@ def main(args):
         scores_file_name = f"Rand_{args.model_name}_{target_dim}{alias}.json" 
 
     elif projection_type == "DimPO":
+        # L_DimPO = L_list + lambda * L_head. k=0, lambda=0 is the listwise term alone.
+        k = args.k
+        lmbda = 0.0 if k == 0 else args.lmbda
         logging.info("=========================================")
-        logging.info(f"\t\tDimPO {target_dim}")
+        logging.info(f"\t\tDimPO {target_dim}, k={k}, lambda={lmbda}")
         logging.info("=========================================\n\n\n\n\n")
         lowdim_module_factory = LowDimDimPOFactory(
                             target_dim=target_dim, beta=1.0, gamma=0.0001, lr=0.0001, batch_size=1,
-                            num_sampled_keys=num_sampled_keys
+                            k=k, lmbda=lmbda, num_sampled_keys=num_sampled_keys
                         )
-        scores_file_name=f"DimPO_{args.model_name}_{target_dim}{alias}.json"
+        if k == 0:
+            scores_file_name=f"DimPO_k0_{args.model_name}_{target_dim}{alias}.json"
+        elif k == 64 and lmbda == 1.0:
+            scores_file_name=f"DimPO_{args.model_name}_{target_dim}{alias}.json"
+        else:
+            scores_file_name=f"DimPO_k{k}_w{lmbda}_{args.model_name}_{target_dim}{alias}.json"
 
     elif projection_type == "SimPO":
         logging.info("=========================================")
@@ -190,6 +191,28 @@ def main(args):
                             key_vector_pair_distance=key_vector_pair_distance, num_sampled_pairs=num_sampled_pairs
                         )
         scores_file_name = f"CPO_{args.model_name}_{target_dim}{alias}.json"
+    elif projection_type == "KL":
+        logging.info("=========================================")
+        logging.info(f"\t\tKL {target_dim}")
+        logging.info("=========================================\n\n\n\n\n")
+        lowdim_module_factory = LowDimKLFactory(
+                            target_dim=target_dim, lr=0.0001, batch_size=1,
+                            num_sampled_keys=num_sampled_keys
+                        )
+        scores_file_name = f"KL_{args.model_name}_{target_dim}{alias}.json"
+
+    elif projection_type == "DimPO_KL":
+        logging.info("=========================================")
+        logging.info(f"\t\tDimPO_KL {target_dim}, kl_weight={args.kl_weight}")
+        logging.info("=========================================\n\n\n\n\n")
+        lowdim_module_factory = LowDimDimPOKLFactory(
+                            target_dim=target_dim, beta=1.0, gamma=0.0001, lr=0.0001, batch_size=1,
+                            kl_weight=args.kl_weight, num_sampled_keys=num_sampled_keys
+                        )
+        scores_file_name = f"DimPO_KL_{args.model_name}_{target_dim}{alias}.json"
+
+    else:
+        raise ValueError(f"Unknown projection_type: {projection_type}")
 
 
     run_experiment(lowdim_module_factory=lowdim_module_factory, scores_file_name=scores_file_name,
@@ -198,11 +221,15 @@ def main(args):
                     checkpoint_path=checkpoint_path, evaluate=args.evaluate)
 
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a single experiment.")
     parser.add_argument("--model_name", required=True, help="Name of the model.")
     parser.add_argument("--target_dim", type=int, required=True, help="Target dimension for the experiment.")
-    parser.add_argument("--projection_type", required=True, help="Type of experiment (e.g., PCA, Rand, CPO, SimPO, DimPO, ORPO).")
+    parser.add_argument("--projection_type", required=True, help="PCA, Rand, DimPO, DimPO_KL, KL, SimPO, ORPO, CPO, Triplet.")
+    parser.add_argument("--k", type=int, default=64, required=False, help="Head size k in L_head. Default 64. Use 0 for the listwise term only (lambda is then 0).")
+    parser.add_argument("--lmbda", type=float, default=1.0, required=False, help="lambda on L_head. Default 1. Ignored when --k 0.")
+    parser.add_argument("--kl_weight", type=float, default=1.0, required=False, help="Weight of the full KL term for the DimPO_KL ablation.")
     parser.add_argument("--experimental_mode", type=str, default="projection_performance", required=False, help="[projection_performance, selection_all_key_pairs, selection_multiple_distinct_pairs, selection_level_of_key_diversity]")
     parser.add_argument("--checkpoint_path", type=str, default=None, required=False, help="If checkpoint path is None, the model is evaluated but not saved. If checkpoint path is specified, the model is not evaluted, but saved.")
     parser.add_argument("--disable_evaluation", dest="evaluate", action="store_false", help="Set this flag to skip evaluation mode (default is to evaluate).")

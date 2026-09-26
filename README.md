@@ -1,184 +1,125 @@
-# DimPO: Dimensionality Reduction for Attention using Preference Optimization
+# DimPO
 
-This repository contains the official code of experiments for the paper **"DimPO: Dimensionality Reduction for Attention using Preference Optimization."**
+Code for the paper *DimPO: Dimensionality Reduction for Attention using Preference Optimization*.
 
-DimPO-based attention projection is a novel approach for reducing the memory footprint of Large Language Models via our new preference optimization loss DimPO, particularly for long-context tasks. By applying a reference-model-free, listwise preference optimization loss, DimPO learns to project key and query vectors into lower-dimensional spaces. Our method effectively preserves attention distributions in these reduced dimensions, enabling significant KV cache memory savings of 10-15% with minimal performance loss on general benchmarks. Furthermore, larger models have also only marginal performance drop on long context benchmarks with 10% of KV Cache memory reduction (while long context tasks are more challenging for smaller models).
+A linear map can send queries and keys of a frozen language model into a lower dimension without updating the model. The obvious training objective is to match the full attention distribution, for example by minimizing KL. DimPO asks a different question: whether a preference over keys, together with the attention mass on the keys the teacher weights most, is a better signal for keeping the model's behavior. The projection is trained on its own in every layer, so later layers cannot compensate for it. Values are never projected.
 
-#### Supported Loss Functions
+## Loss
 
-- **DimPO** (our novel approach)
-- ORPO
-- SimPO
-- CPO
-- Triplet
-- PCA
-- Rand
+The same map \(F_\theta: \mathbb{R}^{d} \rightarrow \mathbb{R}^{d'}\) is applied to a query and its keys. \(\psi\) denotes the original attention weights. \(p\) is the softmax of the projected scores over the full key list. Keys are sorted by \(\psi\) descending, so the first \(k\) positions are the head. The listwise term is a reference-free preference loss with margin \(\gamma \ge 0\),
 
-#### Supported Models
+$$
+\mathcal{L}_{\mathrm{list}}(\pi_\theta)
+=
+\mathbb{E}_{(x,y,\psi)\sim \mathcal{D}}
+\left[
+\sum_{\psi_i > \psi_j}
+\Delta_{i,j}\,
+\log \left(1 + e^{-(s_i - s_j - \gamma)}\right)
+\right],
+$$
 
-This repository includes support for DimPO-based projection on attention layers of the following models:
-*   `LLaMA`
-*   `Qwen2`
-*   `Qwen3`
+$$
+\Delta_{i,j}
+=
+|G_i - G_j|
+\cdot
+\left|
+\frac{1}{D(\tau(i))} - \frac{1}{D(\tau(j))}
+\right|,
+\quad
+G_i = 2^{\psi_i} - 1,
+\quad
+D(\tau(i)) = \log(1+\tau(i)),
+\quad
+s_i = \beta \log \pi_\theta(y_i \mid x).
+$$
 
-To extend support for additional models, follow these steps:
-1.  Implement a new low-dimensional attention layer for your specific model (the same way as `LlamaLowDimAttention` in `./src/models/llama/lowdim_attn.py`). Refer to the model's official [transformers implementation](https://github.com/huggingface/transformers/tree/main/src/transformers/models) for guidance on its original attention layer structure.
-2.  Register the new attention layer by adding it to the `get_lowdim_attention` and `AutoLowDimAttentionsModel.inject_lowdim_attentions` functions in `./src/models/lowdim_modeling.py`.
-3.  Register the new attention layer within the `LowDimTrainer` constructor in `./src/models/lowdim_trainer.py`.
+\(\tau(i)\) is the rank of \(y_i\) under the teacher weights \(\psi\), with rank 1 for the largest \(\psi_i\). The head term is a cross-entropy on those top-\(k\) positions. The normalizer is still the full list,
 
+$$
+\mathcal{L}_{\mathrm{head}} = - \sum_{i=1}^{k} \psi_i \log p_i .
+$$
 
+DimPO is the sum
 
-#### Experiments
+$$
+\mathcal{L}_{\mathrm{DimPO}} = \mathcal{L}_{\mathrm{list}} + \lambda \, \mathcal{L}_{\mathrm{head}}.
+$$
 
-To reproduce our experiments, follow the steps below. The final results, including tables and charts, can be found in the [Experiments notebook](./experiments.ipynb).
+The default is \(k=64\) and \(\lambda=1\). Setting \(k=0\) and \(\lambda=0\) removes the head term and leaves the listwise objective alone.
 
-1. Dimension Reduction
-    - Projection Performance: Evaluate the effectiveness of the DimPO-based projection using `./scripts/01_evaluate_projections.sh`.
-    - Key Pair Selection: Investigate the impact of different key pair selection strategies by running `./scripts/02_run_key_pair_selection_experiments.sh`. This script covers various subexperiments, including All Key Pairs, Level of Key Diversity, and Multiple Distinct Pairs.
+## RULER
 
-2. General Task Evaluation
-    - Generate Checkpoints: Before evaluation, first pre-generate the necessary attention layer projection checkpoints by running `./scripts/03_generate_checkpoints.sh`.
-    - Run Evaluation: Execute the evaluation script `./scripts/04_evaluate_on_general_tasks.sh` to test the DimPO models on a suite of general benchmarks, including HellaSwag, ARC Challenge, MMLU, TruthfulQA mc2, and Winogrande.
+KL reconstructs the original attention more closely. DimPO keeps more of the downstream score once many layers are projected. On Llama3.1-8B, with \(d'=64\), DimPO still holds about 95% of the original RULER 4k score at 50% of the layers. Further down, where the objectives separate:
 
-3. Long Context Evaluation
-    - Checkpoints: Ensure checkpoints are generated by running `./scripts/03_generate_checkpoints.sh` if you have not done so already.
-    - RULER: `./scripts/05_evaluate_on_ruler.sh`
-    - LongBench: `./scripts/06_evaluate_on_longbench.sh`
-    - MagicPIG: For the MagicPIG experiments, navigate to the `MagicPIG` directory and follow the instructions within its own `README.md`.
-    ```sh
-    cd MagicPIG
-    # Follow instructions in the MagicPIG README
-    ```
+| Method | Llama3.1-8B, \(l{=}20\) | Qwen3-4B, \(l{=}24\) |
+| --- | ---: | ---: |
+| Base (\(l{=}0\)) | 95.0 | 93.8 |
+| DimPO (\(k{=}0\), \(\lambda{=}0\)) | 35.6 | 63.4 |
+| DimPO (\(k{=}64\), \(\lambda{=}1\)) | **52.4** | **65.9** |
+| KL | 38.9 | 50.2 |
 
+RULER 4k average at \(d'=64\). \(l{=}20\) is 62.5% of the layers on Llama3.1-8B, \(l{=}24\) is 66.7% on Qwen3-4B. Projections are trained on BookSum sequences of 4096 tokens.
 
-
-
-
-#### Setup
+## Setup
 
 ```sh
-pip install -r requirements.txt
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 ```
 
+`torch==2.5.1+cu121` is the CUDA 12.1 wheel, so the PyTorch index is required. `evaluate_harness.py` needs `lm_eval==0.4.9.1` and registers the model name `LowDimAttentionsModel`.
 
-## Usage
+## Checkpoints
 
-1. Load DimPO layers from checkpoints in python
-*If pretrained checkpoint is not available you need to pretrained them first. See section 'DimPO Checkpoints Pretraining'*
+`checkpoints/` has one directory per model, \(d'=64\), \(k=64\), \(\lambda=1\), one file per layer:
+
+- `DimPO_llama3_8b_instruct_64`
+- `DimPO_llama3_3b_instruct_64`
+- `DimPO_qwen3_4b_instruct_64`
+- `DimPO_qwen2_7b_instruct_64`
+- `DimPO_llama3_1b_instruct_64`
+
+Llama3.2-1B already has head dimension 64, so that checkpoint is not a reduction.
+
+## Load a projection
 
 ```python
 from src.models.lowdim_modeling import AutoLowDimAttentionsModel
 from transformers import AutoTokenizer
 
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-dimpo_path = "./results/checkpoints/DimPO_llama3_1b_instruct_32" # d'=32 
-projected_attention_layers = [8 9 10 11 12 13 14 15] # l = 8
+model_id = "meta-llama/Llama-3.1-8B-Instruct"
+dimpo_path = "./checkpoints/DimPO_llama3_8b_instruct_64"
+# last 8 layers of a 32-layer model
+projected_attention_layers = [24, 25, 26, 27, 28, 29, 30, 31]
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoLowDimAttentionsModel.from_pretrained(
-    model_path = model_id, 
-    lowdim_attentions_path = dimpo_path,
+    model_path=model_id,
+    lowdim_attentions_path=dimpo_path,
     device_map="cuda:0",
-    lowdim_attn_layers = projected_attention_layers
+    lowdim_attn_layers=projected_attention_layers,
 )
 ```
-
-2. Use the loaded model
 
 ```python
 prompt = "Explain why the sky is blue."
 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 output = model.generate(inputs.input_ids, max_new_tokens=256)
-generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-print(generated_text)
+print(tokenizer.decode(output[0], skip_special_tokens=True))
 ```
 
+## Train
 
-#### Projection Performance Experiments
-
-To run experiments that compare different projection methods for attention key and query vectors, use the following command. The script measures performance using KL Divergence and MSE.
+Local model directories are in `MODEL_PATHS` at the top of `run_projection_experiment.py`. Training reads BookSum from `../data/booksum`.
 
 ```sh
 python3 run_projection_experiment.py \
-    --model_name "llama3_1b_instruct" \
-    --target_dim "32" \
+    --model_name "llama3_8b_instruct" \
+    --target_dim "64" \
     --projection_type "DimPO" \
-    --experimental_mode "projection_performance"
-```
-
-The `run_projection_experiment.py` script currently supports the following models:
-- llama3_1b_instruct
-- llama3_3b_instruct
-- llama3_8b_instruct
-- qwen3_4b_instruct
-- qwen2_7b_instruct
-
-To add support for a new model, extend the `MODEL_PATHS` dictionary located at the beginning of the `run_projection_experiment.py` script.
-
-
-
-
-### DimPO Checkpoints Pretraining
-To generate checkpoints for all attention layers of *Llama3.2-1b-Instruct* projecting to target dimension *d'=32* run the following command:
-
-```sh
-python3 run_projection_experiment.py \
-    --model_name "llama3_1b_instruct" \
-    --target_dim "32" \
-    --projection_type "DimPO" \
-    --checkpoint_path "./results/checkpoints/DimPO_llama3_1b_instruct_32" \
+    --checkpoint_path "./checkpoints/DimPO_llama3_8b_instruct_64" \
     --disable_evaluation
 ```
 
-
-
-### Run Harness Tasks
-1. Install lm_eval harness library version 0.4.9.1
-2. Run the following command, specify your own tasks you want to evaluate
-
-```sh
-python ./evaluate_harness.py \
-    --model LowDimAttentionsModel \
-    --model_args "model_path=meta-llama/Llama-3.2-1B-Instruct,lowdim_attentions_path=./results/checkpoints/DimPO_llama3_1b_instruct_32,lowdim_attn_layers=8 9 10 11 12 13 14 15"\
-    --tasks hellaswag,arc_challenge,mmlu,truthfulqa_mc2,winogrande \
-    --output_path ./results/general_tasks/scores/llama3_1b_instruct/32_8 \
-    --num_fewshot 0 --device auto --batch_size 16
-```
-
-
-
-### Effect of Key-Pair Selection on Pairwise Losses Experiments
-
-#### All Key Pairs
-
-```sh
-python3 run_projection_experiment.py \
-    --model_name "llama3_1b_instruct" \
-    --target_dim "32" \
-    --projection_type "DimPO" \
-    --experimental_mode "selection_all_key_pairs" \
-    --num_sampled_keys "8"
-```
-
-#### Multiple Distinct Pairs
-
-```sh
-python3 run_projection_experiment.py \
-    --model_name "llama3_1b_instruct" \
-    --target_dim "32" \
-    --projection_type "DimPO" \
-    --experimental_mode "selection_multiple_distinct_pairs" \
-    --num_sampled_pairs "32"
-```
-
-
-#### Level of Key Diversity
-
-```sh
-python3 run_projection_experiment.py \
-    --model_name "llama3_1b_instruct" \
-    --target_dim "32" \
-    --projection_type "DimPO" \
-    --experimental_mode "selection_level_of_key_diversity" \
-    --key_vector_pair_distance "127"
-```
+`--k 0` drops the head term. `--lmbda` sets \(\lambda\).

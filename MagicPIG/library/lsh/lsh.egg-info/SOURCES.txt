@@ -1,6 +1,0 @@
-lsh.cc
-setup.py
-lsh.egg-info/PKG-INFO
-lsh.egg-info/SOURCES.txt
-lsh.egg-info/dependency_links.txt
-lsh.egg-info/top_level.txt

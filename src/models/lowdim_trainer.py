@@ -65,11 +65,11 @@ class LowDimTrainer:
             logging.info(f"LowDimTrainer training epoch {epoch+1} finished.")
 
             # Log val
-            self._start_score_collection()
-            for val_batch in self.val_loader:
-                self._generate(val_batch["input_ids"], val_batch["attention_mask"])
-            self._finalize_score_collection()
-            self._set_train_mode()
+            #self._start_score_collection()
+            #for val_batch in self.val_loader:
+            #    self._generate(val_batch["input_ids"], val_batch["attention_mask"])
+            #self._finalize_score_collection()
+            #self._set_train_mode()
 
         self._set_eval_mode()
 

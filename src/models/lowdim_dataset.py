@@ -9,7 +9,7 @@ class LowDimDataset(Dataset):
         self.num_instances = num_instances
         self.num_tokens_per_instance = num_tokens_per_instance
 
-        dataset = load_dataset("kmfoda/booksum", split=split,  streaming=True)
+        dataset = load_dataset("../data/booksum", split=split,  streaming=True)
 
         self.data = []
         token_count = 0
