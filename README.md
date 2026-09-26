@@ -6,61 +6,34 @@ A linear map can send queries and keys of a frozen language model into a lower d
 
 ## Loss
 
-The same map \(F_\theta: \mathbb{R}^{d} \rightarrow \mathbb{R}^{d'}\) is applied to a query and its keys. \(\psi\) denotes the original attention weights. \(p\) is the softmax of the projected scores over the full key list. Keys are sorted by \(\psi\) descending, so the first \(k\) positions are the head. The listwise term is a reference-free preference loss with margin \(\gamma \ge 0\),
+The same map $F_\theta: \mathbb{R}^{d} \rightarrow \mathbb{R}^{d'}$ is applied to a query and its keys. $\psi$ denotes the original attention weights. $p$ is the softmax of the projected scores over the full key list. Keys are sorted by $\psi$ descending, so the first $k$ positions are the head. The listwise term is a reference-free preference loss with margin $\gamma \ge 0$,
 
-$$
-\mathcal{L}_{\mathrm{list}}(\pi_\theta)
-=
-\mathbb{E}_{(x,y,\psi)\sim \mathcal{D}}
-\left[
-\sum_{\psi_i > \psi_j}
-\Delta_{i,j}\,
-\log \left(1 + e^{-(s_i - s_j - \gamma)}\right)
-\right],
-$$
+$$\mathcal{L}_{\mathrm{list}}(\pi_\theta) = \mathbb{E}_{(x,y,\psi)\sim \mathcal{D}} \left\lbrack \sum_{\psi_i > \psi_j} \Delta_{i,j}\, \log \left(1 + e^{-(s_i - s_j - \gamma)}\right) \right\rbrack,$$
 
-$$
-\Delta_{i,j}
-=
-|G_i - G_j|
-\cdot
-\left|
-\frac{1}{D(\tau(i))} - \frac{1}{D(\tau(j))}
-\right|,
-\quad
-G_i = 2^{\psi_i} - 1,
-\quad
-D(\tau(i)) = \log(1+\tau(i)),
-\quad
-s_i = \beta \log \pi_\theta(y_i \mid x).
-$$
+$$\Delta_{i,j} = \lvert G_i - G_j \rvert \cdot \left\lvert \frac{1}{D(\tau(i))} - \frac{1}{D(\tau(j))} \right\rvert, \quad G_i = 2^{\psi_i} - 1, \quad D(\tau(i)) = \log(1+\tau(i)), \quad s_i = \beta \log \pi_\theta(y_i \mid x).$$
 
-\(\tau(i)\) is the rank of \(y_i\) under the teacher weights \(\psi\), with rank 1 for the largest \(\psi_i\). The head term is a cross-entropy on those top-\(k\) positions. The normalizer is still the full list,
+$\tau(i)$ is the rank of $y_i$ under the teacher weights $\psi$, with rank 1 for the largest $\psi_i$. The head term is a cross-entropy on those top-$k$ positions. The normalizer is still the full list,
 
-$$
-\mathcal{L}_{\mathrm{head}} = - \sum_{i=1}^{k} \psi_i \log p_i .
-$$
+$$\mathcal{L}_{\mathrm{head}} = - \sum_{i=1}^{k} \psi_i \log p_i .$$
 
 DimPO is the sum
 
-$$
-\mathcal{L}_{\mathrm{DimPO}} = \mathcal{L}_{\mathrm{list}} + \lambda \, \mathcal{L}_{\mathrm{head}}.
-$$
+$$\mathcal{L}_{\mathrm{DimPO}} = \mathcal{L}_{\mathrm{list}} + \lambda \, \mathcal{L}_{\mathrm{head}}.$$
 
-The default is \(k=64\) and \(\lambda=1\). Setting \(k=0\) and \(\lambda=0\) removes the head term and leaves the listwise objective alone.
+The default is $k=64$ and $\lambda=1$. Setting $k=0$ and $\lambda=0$ removes the head term and leaves the listwise objective alone.
 
 ## RULER
 
-KL reconstructs the original attention more closely. DimPO keeps more of the downstream score once many layers are projected. On Llama3.1-8B, with \(d'=64\), DimPO still holds about 95% of the original RULER 4k score at 50% of the layers. Further down, where the objectives separate:
+KL reconstructs the original attention more closely. DimPO keeps more of the downstream score once many layers are projected. On Llama3.1-8B, with $d'=64$, DimPO still holds about 95% of the original RULER 4k score at 50% of the layers. Further down, where the objectives separate:
 
-| Method | Llama3.1-8B, \(l{=}20\) | Qwen3-4B, \(l{=}24\) |
+| Method | Llama3.1-8B, $l=20$ | Qwen3-4B, $l=24$ |
 | --- | ---: | ---: |
-| Base (\(l{=}0\)) | 95.0 | 93.8 |
-| DimPO (\(k{=}0\), \(\lambda{=}0\)) | 35.6 | 63.4 |
-| DimPO (\(k{=}64\), \(\lambda{=}1\)) | **52.4** | **65.9** |
+| Base ($l=0$) | 95.0 | 93.8 |
+| DimPO ($k=0$, $\lambda=0$) | 35.6 | 63.4 |
+| DimPO ($k=64$, $\lambda=1$) | **52.4** | **65.9** |
 | KL | 38.9 | 50.2 |
 
-RULER 4k average at \(d'=64\). \(l{=}20\) is 62.5% of the layers on Llama3.1-8B, \(l{=}24\) is 66.7% on Qwen3-4B. Projections are trained on BookSum sequences of 4096 tokens.
+RULER 4k average at $d'=64$. $l=20$ is 62.5% of the layers on Llama3.1-8B, $l=24$ is 66.7% on Qwen3-4B. Projections are trained on BookSum sequences of 4096 tokens.
 
 ## Setup
 
@@ -72,7 +45,7 @@ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/w
 
 ## Checkpoints
 
-`checkpoints/` has one directory per model, \(d'=64\), \(k=64\), \(\lambda=1\), one file per layer:
+`checkpoints/` has one directory per model, $d'=64$, $k=64$, $\lambda=1$, one file per layer:
 
 - `DimPO_llama3_8b_instruct_64`
 - `DimPO_llama3_3b_instruct_64`
@@ -122,4 +95,4 @@ python3 run_projection_experiment.py \
     --disable_evaluation
 ```
 
-`--k 0` drops the head term. `--lmbda` sets \(\lambda\).
+`--k 0` drops the head term. `--lmbda` sets $\lambda$.
